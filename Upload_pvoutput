@@ -1,0 +1,235 @@
+#!/usr/in/perl
+use warnings;
+use diagnostics;
+use strict;
+use LWP::UserAgent;
+use POSIX qw(strftime);
+#use Template;
+#use 5.010; Only v5.8.8 on a Mac.
+#use lib '/opt/local/lib/perl5/site_perl/5.8.8/darwin-2level';
+
+# global definitions
+our $STALL_DEFAULT = 100; # how many 100ms to wait for new input
+our $MAX_PROCESSED = 1;   # script will close after recording this number
+our $DEBUG = 1;                 # enable debug output
+our $rx_buffer="";              # receive buffer [string]
+
+# local definitions
+my $PORTNAME = "/dev/ttyUSB0";  # Prolific TTL serial
+my $RX_NOW_EXPECTED = 129;                                      # characters to be received
+my $RX_HISTORY_EXPECTED = 138;
+my $TX_CMD_HISTORY = 1;
+my $TX_CMD_NOW = 2;
+
+
+# open and configure the serial port
+use Device::SerialPort qw( :PARAM :STAT 0.07 );
+our $port = new Device::SerialPort ("/dev/ttyUSB0", 1) || die "Can't open $PORTNAME: $!\n";
+$port->baudrate(9600);
+$port->parity("none");
+$port->databits(8);
+$port->stopbits(1);
+$port->handshake ('none');
+$port->stty_icrnl (1);
+$port->stty_ocrnl (1);
+$port->stty_onlcr (1);
+$port->stty_opost (1);
+$port->read_char_time(0);     # don't wait for each character
+$port->read_const_time(30); # 100 ms per unfulfilled "read" call
+$port->write_settings || undef $port;
+
+print "\n";
+our $tm = time();
+our ($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst) = localtime($tm);
+our $filename = sprintf ("%s-%02d%02d%02d%02d%02d%02d", $PORTNAME, $year-100, $mon+1, $mday, $hour, $min, $sec);
+printf "filename=<%s>\n", $filename;
+
+# current power consumption reading
+&tx_cmd ($TX_CMD_NOW);                  # request data
+&rx_reply ($RX_NOW_EXPECTED);   # receive reply
+#&display_current ($rx_buffer);
+&upload_pvoutput ($rx_buffer);
+
+$port->close || warn "close failed";    # release port to OS - needed to reopen
+undef $port;                                                    # triggers DESTROY
+
+####################################################################
+# this function receives and stores the reply  
+# parameter 1: expected number of characters
+
+sub rx_reply
+{
+        my $rx_expected = $_[0];
+        my $timeout=$STALL_DEFAULT;
+        my $this_processed = 0;
+        my $latest_readings;
+        my $chars=0;
+        $main::rx_buffer="";
+RX: while ( ($timeout>0) && ($this_processed < $main::MAX_PROCESSED) ) {
+        my ($count, $saw) = $port->read(255); # read chars
+        if ($count > 0) {
+                        $chars += $count;
+                        $main::rx_buffer .= $saw;
+                }
+        else
+                { $timeout--; }
+        if (length($main::rx_buffer) >= $rx_expected)
+                { last RX;}
+        }
+        if ($main::DEBUG) {
+                printf "Received:\n";
+                &display_hex($main::rx_buffer);
+        }
+        if ($timeout==0) {
+                warn "Waited $STALL_DEFAULT seconds and never saw what I wanted\n";
+        }
+}
+
+#####################################################################
+# this function takes a command parameter and sends it to the  
+# device
+
+sub tx_cmd
+{
+        my $out_str = sprintf "%c%c%c%c", 170, $_[0], 0, 173;
+        if ($main::DEBUG) {
+                print "\n-----------\nSending: ";
+                &display_hex($out_str);
+        }
+        my $count_out = $main::port->write($out_str);
+        warn "write failed\n"         unless ($count_out);
+        warn "write incomplete\n"     if ( $count_out != length($out_str) );
+        #my $return = 1;
+}
+
+#####################################################################
+# this function takes a string buffer parameter  
+# and prints it's contents as hex
+
+sub display_hex
+{
+        my $a = 0;
+        my $chars_per_line = int 16;
+        my $buffer .= $_[0];
+        my $buflen = length($buffer);
+        my @chars = split("", $buffer);
+        my $char_line_count = 0;
+        my $char_index = 0;
+        printf "%.4d: ", $char_index;
+        for (my $i=0; $i < $buflen; $i++) {
+                printf "%.2X ", ord($chars[$i]);
+                $char_line_count++;
+                if ($char_line_count == $chars_per_line/2) { print " "; }
+                if ($char_line_count == $chars_per_line)
+                {
+                        printf "     ";
+                        &display_ascii($char_index, $chars_per_line, \@chars);
+                        $char_index += $chars_per_line;
+                        $char_line_count = 0;
+                        printf "\n%.4d: ", $char_index;
+                }
+        }
+        if ($char_index < $buflen) {
+                # fill spaces
+                for (my $i=$char_line_count; $i < $chars_per_line; $i++)
+                        { print "   "; }
+                if ($char_line_count < $chars_per_line/2) { print " "; }
+                printf "     ";
+                &display_ascii($char_index, $buflen - $char_index, \@chars);
+        }
+        printf "\n";
+}
+#####################################################################
+# this function takes an array of characters 
+# and prints it whilst replacing control chars with a "."
+# para 1: start index
+# para 2: length
+# para 3: reference to array of chars
+
+sub display_ascii
+{
+        my $char_index = $_[0];
+        my $len = $_[1];
+        my $chars_ref = $_[2];
+        #my @chars = @{$chars_array};
+        #printf "--%d %d--", $char_index, $len;
+        my $ascii = 0;
+
+        for (my $a = 0; $a < $len; $a++) {
+                if ($a == 8)
+                        { print " "; }
+                $ascii = ord($chars_ref->[$char_index]);
+                if ( ($ascii > 31) && ($ascii < 127) )
+                        { print $chars_ref->[$char_index]; }
+                else
+                        { print "."; }
+                $char_index++;
+                #printf "%d ", $char_index;
+                #print "*";
+        }
+        #printf "\n";
+
+}
+
+
+##################################################################
+#My attempt to upload to pvoutput
+sub upload_pvoutput
+{
+        my $buffer .= $_[0];
+        my $buflen = length($buffer);
+        my @chars = split("", $buffer);
+        my $kW_now = (ord($chars[14])*256 + ord($chars[13]));
+        my $identifier = (ord($chars[12])*256 + ord($chars[11]));
+
+
+    my $apikey="";
+    my $sysid="";
+    my $updateurl="http://pvoutput.org/service/r2/addstatus.jsp";
+    my $ua=LWP::UserAgent->new(
+        default_headers=>HTTP::Headers->new("X-Pvoutput-Apikey"=>$apikey,
+                                            "X-Pvoutput-SystemId"=>$sysid));
+    $ua->env_proxy;
+    my @data=("d"=>strftime("%Y%m%d",localtime),
+              "t"=>strftime("%H:%M",localtime),
+              "c1"=>0,
+              "v4"=>$kW_now);
+    my $res=$ua->post($updateurl,
+                      \@data);
+printf ("%04d-%02d-%02d %02d:%02d:%02d: %dW\n", $main::year+1900, $main::mon+1, $main::mday, $main::hour, $main::min, $main::sec, $kW_now);
+
+}
+
+sub upload_pvoutput2
+{
+        my $buffer .= $_[0];
+        my $buflen = length($buffer);
+        my @chars = split("", $buffer);
+#        my $kW_now = (ord($chars[14])*256 + ord($chars[13]));
+#        my $identifier = (ord($chars[12])*256 + ord($chars[11]));
+
+        my $idx = 6;
+        my $days_ago = 0;
+        my $day_power = ( ord($chars[$idx++]) + ord($chars[$idx++])*256);
+        my $day_watts = ($day_power* 1000);
+
+
+
+    my $apikey="";
+    my $sysid="";
+    my $updateurl="http://pvoutput.org/service/r2/addstatus.jsp";
+    my $ua=LWP::UserAgent->new(
+        default_headers=>HTTP::Headers->new("X-Pvoutput-Apikey"=>$apikey,
+                                            "X-Pvoutput-SystemId"=>$sysid));
+
+  $ua->env_proxy;
+    my @data=("d"=>strftime("%Y%m%d",localtime),
+              "t"=>strftime("%H:%M",localtime),
+              "c1"=>0,
+              "v3"=>$day_watts);
+#              "v4"=>$kW_now);
+    my $res=$ua->post($updateurl,
+                      \@data);
+printf "%04d-%02d-%02d: %dkWh\n", $year+1900, $mon+1, $mday, $day_watts;
+
+
