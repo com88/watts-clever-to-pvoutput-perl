@@ -50,6 +50,13 @@ printf "filename=<%s>\n", $filename;
 #&display_current ($rx_buffer);
 &upload_pvoutput ($rx_buffer);
 
+# history data
+&tx_cmd ($TX_CMD_HISTORY);
+&rx_reply ($RX_HISTORY_EXPECTED);
+#&display_history($rx_buffer); 
+&upload_pvoutput2 ($rx_buffer);
+
+
 $port->close || warn "close failed";    # release port to OS - needed to reopen
 undef $port;                                                    # triggers DESTROY
 
@@ -205,15 +212,11 @@ sub upload_pvoutput2
         my $buffer .= $_[0];
         my $buflen = length($buffer);
         my @chars = split("", $buffer);
-#        my $kW_now = (ord($chars[14])*256 + ord($chars[13]));
-#        my $identifier = (ord($chars[12])*256 + ord($chars[11]));
 
         my $idx = 6;
         my $days_ago = 0;
         my $day_power = ( ord($chars[$idx++]) + ord($chars[$idx++])*256);
         my $day_watts = ($day_power* 1000);
-
-
 
     my $apikey="";
     my $sysid="";
